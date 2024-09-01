@@ -1,0 +1,298 @@
+import asyncio
+import ctypes
+import json
+import os
+import threading
+import time
+import websockets
+from ctypes import byref
+
+# Load the DLL
+dll_name = "mindtuner.dll"
+dll_path = os.path.dirname(
+    os.path.abspath(__file__)) + os.path.sep + dll_name
+mindtuner = ctypes.WinDLL(dll_path)
+
+# Define BSTR as a POINTER to WCHAR (wide character string)
+BSTR = ctypes.POINTER(ctypes.c_wchar)
+
+# Define the callback function type with __stdcall calling convention
+CALLBACK = ctypes.WINFUNCTYPE(None, ctypes.c_long, ctypes.c_long)
+
+# Define constants
+MD_OK = 0
+MD_FAILED = -1
+
+# Define function prototypes
+mindtuner.MD_Open.argtypes = [ctypes.c_short]
+mindtuner.MD_Open.restype = ctypes.c_long
+
+mindtuner.MD_IsDeviceConnected.argtypes = [ctypes.c_long]
+mindtuner.MD_IsDeviceConnected.restype = ctypes.c_short
+
+mindtuner.MD_Close.argtypes = [ctypes.c_long]
+mindtuner.MD_Close.restype = None
+
+mindtuner.MD_Get_Devices.argtypes = []
+mindtuner.MD_Get_Devices.restype = ctypes.c_short
+
+mindtuner.MD_Set_Sample_Rate.argtypes = [
+    ctypes.c_long, ctypes.POINTER(ctypes.c_double)]
+mindtuner.MD_Set_Sample_Rate.restype = ctypes.c_short
+
+mindtuner.MD_Set_Calibration_Rate.argtypes = [
+    ctypes.c_long, ctypes.POINTER(ctypes.c_double)]
+mindtuner.MD_Set_Calibration_Rate.restype = ctypes.c_short
+
+mindtuner.MD_Set_Calibration_Channel.argtypes = [ctypes.c_long, ctypes.c_short]
+mindtuner.MD_Set_Calibration_Channel.restype = ctypes.c_short
+
+mindtuner.MD_Start.argtypes = [ctypes.c_long]
+mindtuner.MD_Start.restype = ctypes.c_short
+
+mindtuner.MD_Stop.argtypes = [ctypes.c_long]
+mindtuner.MD_Stop.restype = ctypes.c_short
+
+mindtuner.MD_Set_Data_Callback.argtypes = [
+    ctypes.c_long, CALLBACK, ctypes.c_long, ctypes.c_long]
+mindtuner.MD_Set_Data_Callback.restype = None
+
+mindtuner.MD_Get_Last_Error.argtypes = [ctypes.c_long]
+mindtuner.MD_Get_Last_Error.restype = ctypes.c_long
+
+mindtuner.MD_Get_Error_Message.argtypes = [ctypes.c_long]
+mindtuner.MD_Get_Error_Message.restype = BSTR
+
+mindtuner.MD_Get_Sample_Rate.argtypes = [ctypes.c_long]
+mindtuner.MD_Get_Sample_Rate.restype = ctypes.c_double
+
+mindtuner.MD_Get_Calibration_Rate.argtypes = [ctypes.c_long]
+mindtuner.MD_Get_Calibration_Rate.restype = ctypes.c_double
+
+mindtuner.MD_Total_Channels.argtypes = [ctypes.c_long]
+mindtuner.MD_Total_Channels.restype = ctypes.c_short
+
+mindtuner.MD_Get_Channel_Name.argtypes = [ctypes.c_long, ctypes.c_short]
+mindtuner.MD_Get_Channel_Name.restype = BSTR
+
+mindtuner.MD_Max_Value.argtypes = [ctypes.c_long, ctypes.c_short]
+mindtuner.MD_Max_Value.restype = ctypes.c_double
+
+mindtuner.MD_Min_Value.argtypes = [ctypes.c_long, ctypes.c_short]
+mindtuner.MD_Min_Value.restype = ctypes.c_double
+
+mindtuner.MD_Read_Last_Value.argtypes = [ctypes.c_long, ctypes.c_short]
+mindtuner.MD_Read_Last_Value.restype = ctypes.c_double
+
+# WebSocket connections
+connected_clients = set()
+
+# Define a global variable to hold the WebSocket server instance
+websocket_server = None
+event_loop = None
+
+# Utility functions
+
+
+def bstr_to_string(bstr):
+    if bstr:
+        # Read the string as a regular C-style null-terminated string
+        return ctypes.string_at(bstr)
+    return ""
+
+
+def set_calibration(device_handle, channel, desired_calibration_rate):
+    print(f"Setting Calibration Channel to {channel}")
+    if mindtuner.MD_Set_Calibration_Channel(device_handle, channel) != MD_OK:
+        error = mindtuner.MD_Get_Last_Error(device_handle)
+        error_msg = bstr_to_string(mindtuner.MD_Get_Error_Message(error))
+        print(f"Failed to set the calibration channel. Error: {error_msg}")
+        return False
+
+    current_sample_rate = mindtuner.MD_Get_Sample_Rate(device_handle)
+    calibration_rate = current_sample_rate / 2.0
+    print(f"Attempting to set Calibration Rate to {calibration_rate} Hz")
+    if mindtuner.MD_Set_Calibration_Rate(device_handle, byref(ctypes.c_double(calibration_rate))) != MD_OK:
+        error = mindtuner.MD_Get_Last_Error(device_handle)
+        error_msg = bstr_to_string(mindtuner.MD_Get_Error_Message(error))
+        print(f"Failed to set the calibration rate. Error: {error_msg}")
+        return False
+
+    print(f"Requested Calibration Rate: {desired_calibration_rate} Hz")
+    print(f"Actual Calibration Rate: {calibration_rate} Hz")
+    return True
+
+
+def configure_device(device_handle, sample_rate):
+    print(f"Setting Sample Rate to {sample_rate}")
+    actual_sample_rate = ctypes.c_double(sample_rate)
+    if mindtuner.MD_Set_Sample_Rate(device_handle, byref(actual_sample_rate)) != MD_OK:
+        error = mindtuner.MD_Get_Last_Error(device_handle)
+        error_msg = bstr_to_string(mindtuner.MD_Get_Error_Message(error))
+        print(f"Failed to set the sample rate. Error: {error_msg}")
+        return False
+
+    print(f"Requested Sample Rate: {sample_rate} Hz")
+    print(f"Actual Sample Rate: {actual_sample_rate.value} Hz")
+
+    total_channels = mindtuner.MD_Total_Channels(device_handle)
+    print(f"Total Channels: {total_channels}")
+
+    for ch in range(total_channels):
+        channel_name = bstr_to_string(
+            mindtuner.MD_Get_Channel_Name(device_handle, ch))
+        max_value = mindtuner.MD_Max_Value(device_handle, ch)
+        min_value = mindtuner.MD_Min_Value(device_handle, ch)
+        print(
+            f"Channel {ch}: {channel_name}, Max Value: {max_value}, Min Value: {min_value}")
+
+    print("Configuration successful")
+    return True
+
+
+def my_callback(handle, userdata):
+    last_value = mindtuner.MD_Read_Last_Value
+    eeg_data = {}
+    if last_value:
+        eeg_data = {
+            'e0': last_value(handle, 0),
+            'e1': last_value(handle, 1),
+            'e2': last_value(handle, 2),
+            'e3': last_value(handle, 3),
+            'e4': last_value(handle, 4),
+            'e5': last_value(handle, 5),
+            'e6': last_value(handle, 6),
+            'e7': last_value(handle, 7),
+            'gsr': last_value(handle, 8),
+            'tmp': last_value(handle, 9),
+            'ts': time.time_ns()
+        }
+    data_to_send = json.dumps(eeg_data)
+    broadcast_data(data_to_send)
+
+
+# WebSockets functions
+
+
+async def websocket_handler(websocket, path):
+    connected_clients.add(websocket)
+    try:
+        async for message in websocket:
+            # Here we could handle messages from clients if needed
+            pass
+    finally:
+        connected_clients.remove(websocket)
+
+
+async def start_websocket_server():
+    global websocket_server
+    websocket_server = await websockets.serve(websocket_handler, "localhost", 8765)
+    await websocket_server.wait_closed()
+
+
+def stop_websocket_server():
+    if websocket_server:
+        websocket_server.close()
+
+
+def broadcast_data(data):
+    print(data)
+
+
+# Main function
+
+
+def main():
+    global websocket_thread, event_loop
+
+    # Capture the current event loop
+    event_loop = asyncio.get_event_loop()
+
+    # Get number of connected devices
+    num_devices = mindtuner.MD_Get_Devices()
+    if num_devices < 0:
+        print("Failed to get the number of connected devices")
+        return
+
+    print(f"Number of connected devices: {num_devices}")
+
+    for i in range(num_devices):
+        # Open the device
+        device_handle = mindtuner.MD_Open(i)
+        if device_handle < 0:
+            print(f"Failed to open the MindTuner device {i}")
+            continue
+
+        # Check if the device is connected
+        connection_status = mindtuner.MD_IsDeviceConnected(device_handle)
+        if connection_status == 1:
+            print(f"The MindTuner device {i} is connected and open")
+        elif connection_status == 0:
+            print(f"The MindTuner device {i} is connected but not open")
+        elif connection_status == -1:
+            print(f"The MindTuner device {i} is not connected")
+        else:
+            print(f"Unknown status for device {i}")
+
+        # Configure the device
+        if not configure_device(device_handle, 200.0):
+            mindtuner.MD_Close(device_handle)
+            continue
+
+        # Set calibration
+        if not set_calibration(device_handle, 8, 100.0):
+            mindtuner.MD_Close(device_handle)
+            continue
+
+        if not set_calibration(device_handle, 9, 100.0):
+            mindtuner.MD_Close(device_handle)
+            continue
+
+        # Create an instance of the callback function
+        callback_function = CALLBACK(my_callback)
+        mindtuner.MD_Set_Data_Callback(
+            device_handle, callback_function, 100, 1)
+
+        # Start data acquisition
+        print("Starting data acquisition")
+        if mindtuner.MD_Start(device_handle) != MD_OK:
+            error = mindtuner.MD_Get_Last_Error(device_handle)
+            error_msg = bstr_to_string(mindtuner.MD_Get_Error_Message(error))
+            print(f"Failed to start data acquisition. Error: {error_msg}")
+            mindtuner.MD_Close(device_handle)
+            continue
+
+        print("Data acquisition started")
+
+        # Start the WebSocket server in a separate thread
+        websocket_thread = threading.Thread(
+            target=lambda: event_loop.run_until_complete(start_websocket_server()))
+        websocket_thread.start()
+
+        try:
+            while True:
+                time.sleep(1)  # Keep the program running indefinitely
+        except KeyboardInterrupt:
+            pass
+
+        # Stop data acquisition
+        print("Stopping data acquisition")
+        if mindtuner.MD_Stop(device_handle) != MD_OK:
+            error = mindtuner.MD_Get_Last_Error(device_handle)
+            error_msg = bstr_to_string(mindtuner.MD_Get_Error_Message(error))
+            print(f"Failed to stop data acquisition. Error: {error_msg}")
+        else:
+            print("Data acquisition stopped")
+            
+        # Stop the WebSocket server gracefully
+        stop_websocket_server()
+
+        # Join the WebSocket thread
+        websocket_thread.join()
+
+        # Close the device
+        mindtuner.MD_Close(device_handle)
+
+
+if __name__ == "__main__":
+    main()
