@@ -205,6 +205,9 @@ async def broadcast_data(data):
 async def main_async():
     global event_loop
     event_loop = asyncio.get_event_loop()
+    sample_rate_eeg = 250.0
+    sample_rate_gsr = 100.0
+    sample_rate_temp = 100.0
 
     # WebSocket server task
     websocket_task = asyncio.create_task(start_websocket_server())
@@ -234,22 +237,22 @@ async def main_async():
             continue
 
         # Configure the device
-        if not configure_device(device_handle, 200.0):
+        if not configure_device(device_handle, sample_rate_eeg):
             mindtuner.MD_Close(device_handle)
             continue
 
         # Set calibration
-        if not set_calibration(device_handle, 8, 100.0):
+        if not set_calibration(device_handle, 8, sample_rate_gsr):
             mindtuner.MD_Close(device_handle)
             continue
 
-        if not set_calibration(device_handle, 9, 100.0):
+        if not set_calibration(device_handle, 9, sample_rate_temp):
             mindtuner.MD_Close(device_handle)
             continue
 
         # Set the callback function
         callback_function = CALLBACK(my_callback)
-        mindtuner.MD_Set_Data_Callback(device_handle, callback_function, 4, 1)
+        mindtuner.MD_Set_Data_Callback(device_handle, callback_function, int(1000 / sample_rate_eeg), 1)
 
         # Start data acquisition
         print("Starting data acquisition")
