@@ -2,7 +2,6 @@ import asyncio
 import ctypes
 import json
 import os
-import threading
 import time
 import websockets
 from ctypes import byref
@@ -168,7 +167,7 @@ def my_callback(handle, userdata):
             'ts': time.time_ns()
         }
     data_to_send = json.dumps(eeg_data)
-    broadcast_data(data_to_send)
+    asyncio.run_coroutine_threadsafe(broadcast_data(data_to_send), event_loop)
 
 
 # WebSockets functions
@@ -195,18 +194,20 @@ def stop_websocket_server():
         websocket_server.close()
 
 
-def broadcast_data(data):
-    print(data)
+async def broadcast_data(data):
+    if connected_clients:
+        await asyncio.gather(*[client.send(data) for client in connected_clients])
 
 
 # Main function
 
 
-def main():
-    global websocket_thread, event_loop
-
-    # Capture the current event loop
+async def main_async():
+    global event_loop
     event_loop = asyncio.get_event_loop()
+
+    # WebSocket server task
+    websocket_task = asyncio.create_task(start_websocket_server())
 
     # Get number of connected devices
     num_devices = mindtuner.MD_Get_Devices()
@@ -227,12 +228,10 @@ def main():
         connection_status = mindtuner.MD_IsDeviceConnected(device_handle)
         if connection_status == 1:
             print(f"The MindTuner device {i} is connected and open")
-        elif connection_status == 0:
-            print(f"The MindTuner device {i} is connected but not open")
-        elif connection_status == -1:
-            print(f"The MindTuner device {i} is not connected")
         else:
-            print(f"Unknown status for device {i}")
+            print(f"MindTuner device {i} status: {connection_status}")
+            mindtuner.MD_Close(device_handle)
+            continue
 
         # Configure the device
         if not configure_device(device_handle, 200.0):
@@ -248,10 +247,9 @@ def main():
             mindtuner.MD_Close(device_handle)
             continue
 
-        # Create an instance of the callback function
+        # Set the callback function
         callback_function = CALLBACK(my_callback)
-        mindtuner.MD_Set_Data_Callback(
-            device_handle, callback_function, 100, 1)
+        mindtuner.MD_Set_Data_Callback(device_handle, callback_function, 4, 1)
 
         # Start data acquisition
         print("Starting data acquisition")
@@ -264,35 +262,27 @@ def main():
 
         print("Data acquisition started")
 
-        # Start the WebSocket server in a separate thread
-        websocket_thread = threading.Thread(
-            target=lambda: event_loop.run_until_complete(start_websocket_server()))
-        websocket_thread.start()
-
         try:
-            while True:
-                time.sleep(1)  # Keep the program running indefinitely
+            # Keep the program running until interrupted
+            await asyncio.Event().wait()
         except KeyboardInterrupt:
             pass
+        finally:
+            print("Stopping data acquisition")
+            if mindtuner.MD_Stop(device_handle) != MD_OK:
+                error = mindtuner.MD_Get_Last_Error(device_handle)
+                error_msg = bstr_to_string(mindtuner.MD_Get_Error_Message(error))
+                print(f"Failed to stop data acquisition. Error: {error_msg}")
+            else:
+                print("Data acquisition stopped")
+            mindtuner.MD_Close(device_handle)
 
-        # Stop data acquisition
-        print("Stopping data acquisition")
-        if mindtuner.MD_Stop(device_handle) != MD_OK:
-            error = mindtuner.MD_Get_Last_Error(device_handle)
-            error_msg = bstr_to_string(mindtuner.MD_Get_Error_Message(error))
-            print(f"Failed to stop data acquisition. Error: {error_msg}")
-        else:
-            print("Data acquisition stopped")
-            
-        # Stop the WebSocket server gracefully
-        stop_websocket_server()
-
-        # Join the WebSocket thread
-        websocket_thread.join()
-
-        # Close the device
-        mindtuner.MD_Close(device_handle)
-
+    # Cancel the WebSocket server task gracefully
+    websocket_task.cancel()
+    try:
+        await websocket_task
+    except asyncio.CancelledError:
+        pass
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
