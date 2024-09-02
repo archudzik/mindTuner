@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+</head>
+
+<body class="bg-gray-100">
+    <div class="mx-auto max-w-7xl py-12 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-2xl">
+            <div class="overflow-hidden bg-white shadow sm:rounded-lg">
+                <div class="px-4 py-5 sm:p-6">
+                    <div class="relative overflow-hidden rounded border border-dashed border-gray-400 opacity-75">
+                        <div id="stream"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="overflow-hidden bg-white shadow sm:rounded-lg mt-5">
+                <div class="px-4 py-5 sm:p-6">
+                    <div class="relative overflow-hidden rounded border border-dashed border-gray-400 opacity-75">
+                        <div id="fft"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+
+        // Stream Chart
+
+        var streamChart = new ApexCharts(document.querySelector("#stream"), {
+            chart: {
+                type: 'line',
+                height: 350,
+                animations: {
+                    enabled: false,
+                },
+                toolbar: {
+                    show: false
+                },
+            },
+            series: [{
+                name: 'e0',
+                data: []
+            }],
+            xaxis: {
+                type: 'datetime',
+            },
+            yaxis: {
+                max: 100,
+                min: -100
+            },
+            legend: {
+                show: false
+            },
+            stroke: {
+                width: 1
+            },
+            tooltip: {
+                enabled: false
+            }
+        });
+        streamChart.render();
+
+        // FFT Chart
+
+        var fftChart = new ApexCharts(document.querySelector("#fft"), {
+            chart: {
+                type: 'bar',
+                height: 350,
+                animations: {
+                    enabled: false,
+                },
+                toolbar: {
+                    show: false
+                }
+            },
+            series: [{
+                name: 'e0',
+                data: []
+            }],
+            legend: {
+                show: false
+            },
+            stroke: {
+                width: 1
+            },
+            yaxis: {
+                max: 20,
+                min: 0
+            },
+            tooltip: {
+                enabled: false
+            }
+        });
+        fftChart.render();
+
+        // WebSockets
+
+        var socket = new WebSocket("ws://localhost:8765");
+        var streamDataE0 = [];
+        var fftDataE0 = [];
+        var fftUpdate = 0;
+        var streamUpdate = 0;
+        var prec = 1
+
+        socket.addEventListener("open", event => {
+            console.log("Connection established")
+        });
+
+        socket.addEventListener("message", event => {
+            const receivedData = JSON.parse(event.data);
+            const receivedTs = receivedData.ts / 1_000_000; // Convert nanoseconds to milliseconds
+            const dateObject = new Date(receivedTs);
+            const timestamp = dateObject.toLocaleString();
+
+            // Stream Chart
+
+            streamDataE0 = [...streamDataE0, { x: timestamp, y: receivedData.e0.toFixed(prec) }].slice(-300);
+
+            if (receivedTs - streamUpdate > 33) {
+                setTimeout(() => {
+                    streamChart.updateOptions({
+                        series: [{
+                            name: 'e0',
+                            data: streamDataE0
+                        }]
+                    });
+                }, 10);
+                streamUpdate = receivedTs;
+            }
+
+            // FFT Chart
+
+            if (receivedTs - fftUpdate > 250) {
+                setTimeout(() => {
+
+                    fftChart.updateOptions({
+                        series: [{
+                            name: 'e0',
+                            data: [
+                                {
+                                    x: 'delta',
+                                    y: receivedData.e0_bands.delta.toFixed(prec)
+                                },
+                                {
+                                    x: 'theta',
+                                    y: receivedData.e0_bands.theta.toFixed(prec)
+                                },
+                                {
+                                    x: 'alpha',
+                                    y: receivedData.e0_bands.alpha.toFixed(prec)
+                                },
+                                {
+                                    x: 'beta',
+                                    y: receivedData.e0_bands.beta.toFixed(prec)
+                                },
+                                {
+                                    x: 'gamma',
+                                    y: receivedData.e0_bands.gamma.toFixed(prec)
+                                }
+                            ]
+                        }]
+                    });
+                }, 10);
+                fftUpdate = receivedTs;
+            }
+
+        });        
+    </script>
+</body>
+
+</html>

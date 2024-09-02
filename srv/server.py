@@ -4,6 +4,7 @@ import json
 import os
 import time
 import websockets
+import numpy as np
 from ctypes import byref
 
 # Load the DLL
@@ -90,6 +91,25 @@ connected_clients = set()
 websocket_server = None
 event_loop = None
 
+# Sampling
+sample_rate_eeg = 250.0
+sample_rate_gsr = 100.0
+sample_rate_temp = 100.0
+
+# Global variables for accumulating EEG data
+e0_buffer = []
+e0_bands = []
+buffer_size = 256
+
+# EEG bands
+bands = {
+    'delta': (0.5, 4),
+    'theta': (4, 8),
+    'alpha': (8, 13),
+    'beta': (13, 30),
+    'gamma': (30, 100)
+}
+
 # Utility functions
 
 
@@ -166,9 +186,33 @@ def my_callback(handle, userdata):
             'tmp': last_value(handle, 9),
             'ts': time.time_ns()
         }
-    data_to_send = json.dumps(eeg_data)
-    asyncio.run_coroutine_threadsafe(broadcast_data(data_to_send), event_loop)
+    asyncio.run_coroutine_threadsafe(broadcast_data(eeg_data), event_loop)
+    
+# FFT functions
 
+def calculate_fft(eeg_data, sampling_rate):
+    n = len(eeg_data)
+    fft_values = np.fft.fft(eeg_data)
+    fft_values = fft_values[:n//2]  # Keep only the positive frequencies
+    freqs = np.fft.fftfreq(n, 1/sampling_rate)[:n//2]
+    
+    # Normalizing the FFT output
+    positive_fft_values = np.abs(fft_values) / n
+
+    return freqs, positive_fft_values
+
+def band_power(freqs, fft_values, band):
+    # Find the indices of the frequency band
+    band_indices = np.where((freqs >= band[0]) & (freqs <= band[1]))[0]
+    
+    # Handle cases where the band is not present in the frequencies
+    if len(band_indices) == 0:
+        return 0
+
+    # Calculate the power in the band
+    band_power_value = np.sum(fft_values[band_indices]**2) / len(band_indices)
+    
+    return band_power_value
 
 # WebSockets functions
 
@@ -194,9 +238,29 @@ def stop_websocket_server():
         websocket_server.close()
 
 
-async def broadcast_data(data):
+async def broadcast_data(eeg_data):
+    global e0_buffer, e0_bands
+
+    # Update the buffer with the new sample for e0
+    e0_buffer.append(eeg_data['e0'])
+
+    # Maintain the buffer size to the specified window size
+    if len(e0_buffer) > buffer_size:
+        e0_buffer.pop(0)  # Remove the oldest sample to maintain buffer size
+
+    # Perform FFT if buffer is full
+    if len(e0_buffer) == buffer_size:
+        freqs, fft_values = calculate_fft(e0_buffer, sample_rate_eeg)
+        e0_bands = {
+            band: band_power(freqs, fft_values, freq_range)
+            for band, freq_range in bands.items()
+        }
+        eeg_data['e0_bands'] = e0_bands
+    
+
+    data_to_send = json.dumps(eeg_data)
     if connected_clients:
-        await asyncio.gather(*[client.send(data) for client in connected_clients])
+        await asyncio.gather(*[client.send(data_to_send) for client in connected_clients])
 
 
 # Main function
@@ -205,9 +269,6 @@ async def broadcast_data(data):
 async def main_async():
     global event_loop
     event_loop = asyncio.get_event_loop()
-    sample_rate_eeg = 250.0
-    sample_rate_gsr = 100.0
-    sample_rate_temp = 100.0
 
     # WebSocket server task
     websocket_task = asyncio.create_task(start_websocket_server())
