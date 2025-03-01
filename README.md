@@ -1,4 +1,4 @@
-# MindTuner X2-10 EEG Interface
+# MindTuner X2-10 EEG Interface and Connector
 
  App file creates a real-time data visualization dashboard using WebSockets to receive streaming data and displays it using charts. The file uses Tailwind CSS for styling and ApexCharts for rendering the charts. The dashboard consists of two charts: a line chart for streaming data and a bar chart for FFT band data.
 
