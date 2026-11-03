@@ -26,3 +26,9 @@
 1. Run srv/server.py server locally using 32-bit (!!) Python.
 2. Open the HTML file in a web browser.
 3. The dashboard will start displaying data automatically.
+
+## Legacy requirements and preserved dependencies
+
+The backend uses a native Windows `mindtuner.dll` loaded through Python's `ctypes.WinDLL`. It therefore requires Windows and a Python process with the same architecture as the DLL; the original setup calls for 32-bit Python. This dependency is intentionally preserved rather than replaced.
+
+The server script also imports `numpy` and `websockets`. Install compatible versions in the same Python environment used to launch `srv/server.py`. The dashboard connects to `ws://localhost:8765`; it is intended for local use and is not described here as a secured or authenticated remote service. External DLLs and browser libraries retain their original licensing terms; the repository's MIT license does not relicense them.
